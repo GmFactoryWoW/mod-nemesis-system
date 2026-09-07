@@ -13,27 +13,6 @@
 
 NemesisSystem.Enable = 1
 
-#
-#    NemesisSystem.CitySiegeIntegration.Enable
-#        Description: Allows active City Siege attackers and defenders to roll
-#                     for nemesis promotion when they kill a real player.
-#                     Siege-created nemeses are runtime-only because siege
-#                     creatures are temporary summons.
-#        Default:     0 - disabled
-#                     1 - enabled
-#
-
-NemesisSystem.CitySiegeIntegration.Enable = 0
-
-#
-#    NemesisSystem.CitySiegeIntegration.Chance
-#        Description: Percent chance for an active City Siege attacker or
-#                     defender to trigger a nemesis promotion on a real-player
-#                     kill when the integration is enabled.
-#        Default:     10.0
-#
-
-NemesisSystem.CitySiegeIntegration.Chance = 10.0
 
 #
 #    NemesisSystem.MaxRank
@@ -160,13 +139,6 @@ NemesisSystem.DecayHours = 48
 
 NemesisSystem.RevengeRewardItem = 0
 
-#
-#    NemesisSystem.RevengeRewardCount
-#        Description: Count for the revenge reward item.
-#        Default:     1
-#
-
-NemesisSystem.RevengeRewardCount = 1
 
 #
 #    NemesisSystem.RevengeRewardItemPerRankBonus
@@ -201,13 +173,6 @@ NemesisSystem.RevengeRewardGoldPerRankBonus = 2500
 
 NemesisSystem.BountyRewardItem = 0
 
-#
-#    NemesisSystem.BountyRewardCount
-#        Description: Count for the bounty reward item.
-#        Default:     1
-#
-
-NemesisSystem.BountyRewardCount = 1
 
 #
 #    NemesisSystem.BountyRewardItemPerRankBonus
@@ -216,6 +181,49 @@ NemesisSystem.BountyRewardCount = 1
 #
 
 NemesisSystem.BountyRewardItemPerRankBonus = 0
+
+#
+#    NemesisSystem.RewardItemCountMin
+#        Description: Minimum random BASE number of reward items.
+#                     The server chooses between Min and Max, then adds the
+#                     per-rank item bonus and applies the level multiplier
+#                     when enabled.
+#        Default:     1
+#
+
+NemesisSystem.RewardItemCountMin = 1
+
+#
+#    NemesisSystem.RewardItemCountMax
+#        Description: Maximum random BASE number of reward items.
+#                     If lower than Min, Min is used. Set equal to Min for a
+#                     fixed base quantity.
+#        Default:     1
+#
+
+NemesisSystem.RewardItemCountMax = 1
+
+#
+#    NemesisSystem.RewardApplyMultiplierToItemCount
+#        Description: Apply the level-based reward multiplier to item quantities.
+#                     Gold rewards are always multiplied as before.
+#        Default:     1 - enabled
+#                     0 - disabled
+#
+
+NemesisSystem.RewardApplyMultiplierToItemCount = 1
+
+#
+#    NemesisSystem.RewardApplyRankMultiplierToItemCount
+#        Description: Multiply item quantity by the Nemesis rank after the
+#                     random base quantity and optional per-rank additive bonus.
+#                     Rank multipliers are N1 x1, N2 x2, N3 x3, N4 x4, N5 x5.
+#                     The level-based multiplier is applied afterwards when enabled.
+#        Default:     1 - enabled
+#                     0 - disabled
+#
+
+NemesisSystem.RewardApplyRankMultiplierToItemCount = 1
 
 #
 #    NemesisSystem.BountyRewardGold
@@ -296,33 +304,6 @@ NemesisSystem.RegenerationIntervalMs = 5000
 NemesisSystem.RegenerationHealthPct = 3.0
 
 #
-#    NemesisSystem.AnnounceOnCreate
-#        Description: Sends nemesis creation and rank-up announcements to the
-#                     nemesis zone. Reaching rank 5 is announced server-wide.
-#        Default:     1 - enabled
-#                     0 - disabled
-#
-
-NemesisSystem.AnnounceOnCreate = 1
-
-#
-#    NemesisSystem.AnnounceOnKill
-#        Description: Sends nemesis kill announcements to the nemesis zone.
-#        Default:     1 - enabled
-#                     0 - disabled
-#
-
-NemesisSystem.AnnounceOnKill = 1
-
-#
-#    NemesisSystem.AnnounceMinRank
-#        Description: Minimum nemesis rank required before announcements are sent.
-#        Default:     1
-#
-
-NemesisSystem.AnnounceMinRank = 1
-
-#
 #    NemesisSystem.VisualAuraSpell
 #        Description: Optional global aura override applied to active nemeses.
 #                     When set to 0, rank-based aura settings below are used.
@@ -363,44 +344,27 @@ NemesisSystem.VisualAuraSpellRank3 = 63132
 #    NemesisSystem.VisualAuraSpellRank4
 #        Description: Aura spell used for rank 4 nemeses when the global
 #                     visual aura override is disabled.
-#        Default:     45265 (Akil'zon static visual)
+#        Default:     61023
 #
 
-NemesisSystem.VisualAuraSpellRank4 = 45265
+NemesisSystem.VisualAuraSpellRank4 = 61023
 
 #
 #    NemesisSystem.VisualAuraSpellRank5
 #        Description: Aura spell used for rank 5 and higher nemeses when the
 #                     global visual aura override is disabled.
-#        Default:     28136 (Thaddius visual lightning)
+#        Default:     41079
 #
 
-NemesisSystem.VisualAuraSpellRank5 = 28136
+NemesisSystem.VisualAuraSpellRank5 = 41079
 
 #
-#    NemesisSystem.AddonBootstrapRecentHours
-#        Description: Recent nemeses within this many hours are included in
-#                     player addon bootstrap responses, alongside rank 5 and
-#                     relation-matched nemeses.
-#        Default:     24
+#    NemesisSystem.AddonSnapshotIntervalSeconds
+#        Description: Interval, in seconds, between authoritative full snapshots
+#                     pushed by the server to every connected client.
+#                     The addon never requests data from the server.
+#                     Set to 0 to disable periodic snapshots (login + live pushes remain).
+#        Default:     120
 #
 
-NemesisSystem.AddonBootstrapRecentHours = 24
-
-#
-#    NemesisSystem.AddonBootstrapMaxEntries
-#        Description: Maximum number of nemesis entries sent in a filtered
-#                     player addon bootstrap response.
-#        Default:     100
-#
-
-NemesisSystem.AddonBootstrapMaxEntries = 100
-
-#
-#    NemesisSystem.AddonReportCooldownSeconds
-#        Description: Minimum time between validated addon sighting updates for
-#                     the same nemesis spawn.
-#        Default:     30
-#
-
-NemesisSystem.AddonReportCooldownSeconds = 30
+NemesisSystem.AddonSnapshotIntervalSeconds = 120

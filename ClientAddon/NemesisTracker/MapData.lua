@@ -39,6 +39,7 @@ local byZoneId = {
     [46] = zone("BurningSteppes"),
     [47] = zone("Hinterlands"),
     [51] = zone("SearingGorge"),
+    [54] = zone("Elwynn"), -- Jasperlode Mine (WDM micro-map parent)
     [65] = zone("Dragonblight"),
     [66] = zone("ZulDrak"),
     [67] = zone("StormPeaks"),
@@ -135,6 +136,9 @@ local zoneNameAliases = {
     ["Dwarven District"] = zone("Stormwind"),
     ["Eastern Plaguelands"] = zone("EasternPlaguelands"),
     ["Elwynn Forest"] = zone("Elwynn"),
+    ["Jasperlode Mine"] = zone("Elwynn"),
+    ["Mine Veine-de-jaspe"] = zone("Elwynn"),
+    ["Mine Veine-de-Jaspe"] = zone("Elwynn"),
     ["Eversong Woods"] = zone("EversongWoods"),
     ["Falconwing Square"] = zone("EversongWoods"),
     ["Felwood"] = zone("Felwood"),
@@ -275,6 +279,11 @@ function MapData:GetZone(zoneId, zoneName)
     end
 
     return nil
+end
+
+function MapData:GetZoneFile(zoneId, zoneName)
+    local zone = self:GetZone(zoneId, zoneName)
+    return zone and zone.file or nil
 end
 
 function MapData:GetZoneKey(zoneId, zoneName)
