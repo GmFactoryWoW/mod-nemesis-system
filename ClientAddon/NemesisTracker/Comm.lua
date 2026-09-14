@@ -33,7 +33,14 @@ local function joinFields(fields, startIndex, delimiter)
     return table.concat(fields, delimiter or ":", startIndex)
 end
 
+function NT:ConfirmServerData()
+    if self.data.serverDataConfirmed then return end
+    self.data.serverDataConfirmed = true
+    if self.UI then self.UI:RefreshAll() end
+end
+
 function NT:BeginBootstrap()
+    self:ConfirmServerData()
     self.data.bootstrapActive = true
     wipe(self.data.nemeses)
     wipe(self.data.nemesesByUnitGuid)
@@ -180,14 +187,19 @@ function NT:ParseServerPayload(payload)
     elseif opcode == "BOOTSTRAP_BEGIN" then
         self:BeginBootstrap()
     elseif opcode == "BOOTSTRAP_ENTRY" then
+        self:ConfirmServerData()
         self:UpsertNemesisFromFields(fields, 3)
     elseif opcode == "BOOTSTRAP_END" then
+        self:ConfirmServerData()
         self:FinalizeBootstrap()
     elseif opcode == "UPSERT_VALIDATED" then
+        self:ConfirmServerData()
         self:UpsertNemesisFromFields(fields, 3)
     elseif opcode == "REMOVE" then
+        self:ConfirmServerData()
         self:RemoveNemesis(tonumber(fields[3]))
     elseif opcode == "MAP_CLEAR" then
+        self:ConfirmServerData()
         self:ClearMapNemeses(fields[3])
     end
 end

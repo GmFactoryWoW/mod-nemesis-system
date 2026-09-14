@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.4.1
+
+- Nemesis rank auras are now re-applied immediately after AzerothCore evade/reset processing, preventing a newly promoted Nemesis from losing its visual aura when it returns to its spawn point. - 2026-09-14
+- Nemesis promotion aura is now applied synchronously with `AddAura()` when a creature kills a player; the periodic aura refresh is repair-only. - 2026-09-09
+
+### Reward messaging and UI safety
+
+- Corrected revenge messaging so the original Nemesis target is explicitly told when a group member delivered the killing blow instead of receiving text that implies they killed the Nemesis themselves.
+- Kept distinct messages for personal revenge, group-assisted revenge, the killing group member, and other eligible participants.
+- Restored the original WorldMap `EasyMenu` / `UIDropDownMenuTemplate` integration; the blocked-action issue was unrelated to the map menu.
+- Detached the Nemesis target-rank overlay from the protected `TargetFrame` hierarchy while keeping it visually anchored to the target frame, preventing combat-time refreshes after a Nemesis kill from tainting protected Blizzard UI actions.
+
+### AddOn & FrameXML integration
+
+- Kept NemesisTracker on version `0.4.1` while making the client package loadable through either the standard `Interface/AddOns/NemesisTracker` path or an `Interface/FrameXML/NemesisTracker` integration.
+- Added a native `Interface > AddOns > NemesisTracker` configuration panel in both loading modes.
+- Exposed the existing World Map visibility and low-level Nemesis filtering settings through the Interface Options panel while keeping the World Map quick menu synchronized with the same settings.
+- Made addon-owned textures resolve through the active AddOns or FrameXML root so Nemesis map and portrait assets work in either installation mode.
+- Preserved `NemesisTrackerDB` persistence in standard addon mode and registered the same database for saving when loaded through FrameXML.
+- Kept the same Lua module order for TOC and XML loading so both integration methods initialize the tracker consistently.
+
+
+### World Map & cache isolation
+
+- Scoped cached Nemesis positions to the current realm so switching realms cannot display positions learned on another realm.
+- Kept addon display preferences global while storing Nemesis tracking data separately for each realm.
+- Discarded the legacy unscoped position cache instead of assigning potentially foreign data to the current realm.
+- Added a volatile session-only fallback when the realm name cannot be resolved, preventing cross-realm cache contamination.
+
+### Server availability & authoritative display
+
+- World Map icons now remain hidden until the current server sends an authoritative Nemesis data stream during the session.
+- A server without `mod-nemesis-system` therefore shows no cached Nemesis icons even if data from an earlier session exists.
+- Receiving an authoritative bootstrap confirms the server data source even when the realm currently has zero Nemeses, allowing the server to clear stale cached entries correctly.
+- Live authoritative updates (`UPSERT`, `REMOVE`, and `MAP_CLEAR`) also validate the server data source before affecting World Map visibility.
+- The addon-channel `HELLO_ACK` handshake alone does not authorize cached map icons; actual Nemesis synchronization data is required.
+
+### Gameplay & Nemesis lifecycle
+
+- Apply the Nemesis visual rank aura immediately when an eligible creature kills a player and is promoted, instead of waiting for a later periodic aura refresh.
+- Preserve the Nemesis state until player/pet kill reward processing completes, preventing death cleanup from racing reward attribution.
+
+### Rewards & player feedback
+
+- Resolve the actual player responsible for a Nemesis kill through direct attacks and controlled units, including pets, demons, guardians/charmed units, and player-controlled vehicles.
+- Added an idempotent per-Nemesis kill reward claim so overlapping death hooks cannot grant rewards more than once for the same death.
+- Reset the reward claim only when the same spawn becomes/promotes as a Nemesis again, allowing future Nemesis lifecycles to reward normally.
+- Evaluate revenge eligibility per recipient and always prioritize the revenge reward when a player also qualifies for the generic kill/bounty reward, guaranteeing a single reward per eligible player and kill.
+- Added distinct role-play reward messages for personal revenge, a group member avenging the Nemesis target, and ordinary bounty kills.
+- Personal revenge now explicitly tells the player that they have defeated their own Nemesis.
+- When a party member kills another member's Nemesis, the Nemesis target, killer, and other eligible nearby party members receive context-appropriate messages.
+- Restrict group Nemesis rewards to members within AzerothCore's normal group reward distance; dead members remain eligible when their corpse is within reward range.
+- Exclude distant group members from both reward distribution and level scaling.
+- Calculate the shared reward level multiplier from the highest-level player among the actually eligible nearby recipients only.
+- Added a role-play reward notification when a player receives an item for defeating a Nemesis, naming both the slain Nemesis and the player being avenged.
+- Check inventory capacity before granting the item reward instead of relying on a silent `AddItem` attempt.
+- When the reward cannot fit in the player's bags, send the complete item reward by in-game mail and explicitly mention the mail delivery in the reward notification.
+- Keep reward item delivery all-or-nothing so a full inventory cannot silently lose part of a configured reward.
+
+
 ## 0.4.0 - 2026-09-07
 
 ### World Map & tracking

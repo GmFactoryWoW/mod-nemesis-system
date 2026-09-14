@@ -16,6 +16,8 @@ NT.data = NT.data or {
     nemesesByUnitGuid = {},
     chunks = {},
     bootstrapActive = false,
+    serverDataConfirmed = false,
+    addonTransportVerified = false,
 }
 NT.data.nemesesByUnitGuid = NT.data.nemesesByUnitGuid or {}
 

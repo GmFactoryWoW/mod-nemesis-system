@@ -14,5 +14,6 @@
     <Script file="Comm.lua"/>
     <Script file="WorldMap.lua"/>
     <Script file="UnitUI.lua"/>
+    <Script file="Options.lua"/>
     <Script file="Lifecycle.lua"/>
 </Ui>

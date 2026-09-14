@@ -2,8 +2,9 @@
 ## Title: NemesisTracker
 ## Notes: World map tracker for mod-nemesis-system
 ## Author: Cascade
-## Version: 0.4.0
+## Version: 0.4.1
 ## SavedVariables: NemesisTrackerDB
+## X-Category: Map, Miscellaneous
 
 Bootstrap.lua
 Libs\Astrolabe\DongleStub.lua
@@ -16,4 +17,5 @@ Data.lua
 Comm.lua
 WorldMap.lua
 UnitUI.lua
+Options.lua
 Lifecycle.lua

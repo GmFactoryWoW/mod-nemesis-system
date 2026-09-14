@@ -8,6 +8,8 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Group.h"
+#include "Item.h"
+#include "Mail.h"
 #include "GuildMgr.h"
 #include "Map.h"
 #include "ObjectGuid.h"
@@ -16,6 +18,7 @@
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
+#include "SpellAuras.h"
 #include "UnitScript.h"
 #include "WorldSession.h"
 #include "World.h"
@@ -33,6 +36,7 @@
 #include <sstream>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 
 using namespace Acore::ChatCommands;
@@ -100,6 +104,8 @@ namespace
     NemesisStore ActiveNemeses;
     NemesisTickStore RegenTickAccumulators;
     NemesisTickStore VisualAuraTickAccumulators;
+    NemesisTickStore DeadCleanupTickAccumulators;
+    std::unordered_set<ObjectGuid::LowType> RewardedNemesisKills;
     std::recursive_mutex NemesisStoreMutex;
     bool CacheLoaded = false;
 
@@ -315,7 +321,11 @@ namespace
             if (creature->HasAura(auraSpell))
                 continue;
 
-            creature->CastSpell(creature, auraSpell, TRIGGERED_FULL_MASK);
+            // Visual Nemesis markers are persistent auras, not gameplay casts.
+            // AddAura applies the aura synchronously; no periodic refresh is required
+            // for the initial promotion. AzerothCore handles the normal aura update
+            // propagation to nearby clients.
+            creature->AddAura(auraSpell, creature);
         }
     }
 
@@ -1074,6 +1084,7 @@ namespace
         ActiveNemeses.erase(spawnId);
         RegenTickAccumulators.erase(spawnId);
         VisualAuraTickAccumulators.erase(spawnId);
+        DeadCleanupTickAccumulators.erase(spawnId);
         CharacterDatabase.Execute("DELETE FROM `character_nemesis` WHERE `guid` = {}", uint64(spawnId));
         BroadcastNemesisRemove(spawnId, reason);
     }
@@ -1134,6 +1145,27 @@ namespace
         return true;
     }
 
+
+
+    bool UpdateDeadCleanupAccumulator(Creature* creature, uint32 diff, uint32 delay)
+    {
+        if (!creature || !creature->GetSpawnId())
+            return false;
+
+        std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+        uint32& accumulator = DeadCleanupTickAccumulators[creature->GetSpawnId()];
+        accumulator += diff;
+        return accumulator >= delay;
+    }
+
+    void EraseDeadCleanupAccumulator(Creature* creature)
+    {
+        if (!creature || !creature->GetSpawnId())
+            return;
+
+        std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+        DeadCleanupTickAccumulators.erase(creature->GetSpawnId());
+    }
 
     NemesisState BuildInitialNemesisState(Creature* killer, Player* killed)
     {
@@ -1220,19 +1252,37 @@ namespace
             creature->SetFullHealth();
     }
 
-    bool IsRevengeKill(Player* killer, NemesisState const& state)
+    bool IsPlayerEligibleForRevenge(Player* player, NemesisState const& state)
     {
-        if (!killer)
+        if (!player)
             return false;
 
-        if (killer->GetGUID().GetCounter() == state.targetGuid)
+        if (player->GetGUID().GetCounter() == state.targetGuid)
             return true;
 
-        Group* group = killer->GetGroup();
+        Group* group = player->GetGroup();
         if (!group)
             return false;
 
         return group->IsMember(ObjectGuid::Create<HighGuid::Player>(state.targetGuid));
+    }
+
+    bool TryClaimNemesisKillReward(ObjectGuid::LowType spawnId)
+    {
+        if (!spawnId)
+            return false;
+
+        std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+        return RewardedNemesisKills.insert(spawnId).second;
+    }
+
+    void ResetNemesisKillRewardClaim(ObjectGuid::LowType spawnId)
+    {
+        if (!spawnId)
+            return;
+
+        std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+        RewardedNemesisKills.erase(spawnId);
     }
 
     struct RewardRecipients
@@ -1269,14 +1319,11 @@ namespace
             if (!member)
                 continue;
 
-            if (member != killer)
-            {
-                if (member->HasCorpse())
-                    continue;
-
-                if (!member->IsAtGroupRewardDistance(killed))
-                    continue;
-            }
+            // AzerothCore's group reward distance check accounts for both the
+            // living player position and a nearby released corpse. The killer
+            // is always eligible because they delivered the fatal blow.
+            if (member != killer && !member->IsAtGroupRewardDistance(killed))
+                continue;
 
             addRecipient(member);
         }
@@ -1338,10 +1385,62 @@ namespace
         return uint32((float(baseGold) * multiplier) + 0.5f);
     }
 
-    void GrantReward(Player* player, bool revenge, uint8 rank, float rewardMultiplier)
+    struct RewardGrantResult
     {
+        uint32 itemId = 0;
+        uint32 itemCount = 0;
+        bool itemGranted = false;
+        bool itemMailed = false;
+    };
+
+    bool SendNemesisRewardByMail(Player* player, uint32 itemId, uint32 itemCount, std::string const& nemesisName, std::string const& targetName)
+    {
+        if (!player || !itemId || !itemCount)
+            return false;
+
+        ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(itemId);
+        if (!itemTemplate)
+            return false;
+
+        MailDraft draft("Butin de Némésis", Acore::StringFormat(
+            "La chute de {} a lavé l'affront fait à {}.$B$B"
+            "Votre récompense n'a pu trouver place dans vos sacs. Elle vous est donc remise par courrier.",
+            nemesisName, targetName));
+
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        uint32 remaining = itemCount;
+        uint32 const maxStack = std::max<uint32>(1, itemTemplate->GetMaxStackSize());
+        uint32 attachments = 0;
+
+        while (remaining && attachments < MAX_MAIL_ITEMS)
+        {
+            uint32 const stackCount = std::min(remaining, maxStack);
+            Item* item = Item::CreateItem(itemId, stackCount, nullptr);
+            if (!item)
+                return false;
+
+            item->SaveToDB(trans);
+            draft.AddItem(item);
+            remaining -= stackCount;
+            ++attachments;
+        }
+
+        // Reward quantities are normally small. Refuse an incomplete mail rather
+        // than silently dropping items if a custom configuration exceeds the
+        // attachment capacity of a single WoW mail.
+        if (remaining)
+            return false;
+
+        draft.SendMailTo(trans, MailReceiver(player, player->GetGUID().GetCounter()), MailSender(MAIL_CREATURE, 34337));
+        CharacterDatabase.CommitTransaction(trans);
+        return true;
+    }
+
+    RewardGrantResult GrantReward(Player* player, bool revenge, uint8 rank, float rewardMultiplier, std::string const& nemesisName, std::string const& targetName)
+    {
+        RewardGrantResult result;
         if (!player)
-            return;
+            return result;
 
         uint32 const rankBonusSteps = rank > 0 ? uint32(rank - 1) : 0;
 
@@ -1360,18 +1459,128 @@ namespace
         uint32 const rankMultiplier = ShouldApplyRankMultiplierToItems() ? std::max<uint32>(1, uint32(rank)) : 1;
         uint32 const rankedItemCount = baseItemCount * rankMultiplier;
 
-        uint32 itemCount = ShouldApplyRewardMultiplierToItems()
+        uint32 const itemCount = ShouldApplyRewardMultiplierToItems()
             ? GetScaledItemCount(rankedItemCount, rewardMultiplier)
             : (rewardMultiplier > 0.0f ? rankedItemCount : 0);
 
         uint32 const baseGold = GetRewardGold(revenge) + (GetRewardGoldPerRankBonus(revenge) * rankBonusSteps);
         uint32 const gold = GetScaledGold(baseGold, rewardMultiplier);
 
-        if (uint32 itemId = GetRewardItem(revenge); itemId && itemCount)
-            player->AddItem(itemId, itemCount);
+        result.itemId = GetRewardItem(revenge);
+        result.itemCount = itemCount;
+
+        if (result.itemId && result.itemCount)
+        {
+            ItemPosCountVec dest;
+            InventoryResult const storeResult = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, result.itemId, result.itemCount);
+            if (storeResult == EQUIP_ERR_OK)
+            {
+                player->StoreNewItem(dest, result.itemId, true);
+                result.itemGranted = true;
+            }
+            else if (SendNemesisRewardByMail(player, result.itemId, result.itemCount, nemesisName, targetName))
+            {
+                result.itemGranted = true;
+                result.itemMailed = true;
+            }
+        }
 
         if (gold)
             player->ModifyMoney(int32(gold), true);
+
+        return result;
+    }
+
+    void NotifyNemesisItemReward(Player* player, Player* killer, uint32 targetGuid, bool revenge, RewardGrantResult const& reward, std::string const& nemesisName, std::string const& targetName)
+    {
+        if (!player || !killer || !player->GetSession() || !reward.itemGranted || !reward.itemId || !reward.itemCount)
+            return;
+
+        std::string itemName = Acore::StringFormat("objet {}", reward.itemId);
+        if (ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(reward.itemId))
+            itemName = itemTemplate->Name1;
+
+        uint32 const playerGuid = player->GetGUID().GetCounter();
+        uint32 const killerGuid = killer->GetGUID().GetCounter();
+        bool const killerAvengedSelf = killerGuid == targetGuid;
+        bool const recipientIsTarget = playerGuid == targetGuid;
+        bool const recipientIsKiller = playerGuid == killerGuid;
+        std::string const killerName = killer->GetName();
+
+        std::string message;
+
+        // Message role is determined from the recipient first. In particular,
+        // the original Nemesis target must never be told that they delivered
+        // the killing blow when another group member actually killed it.
+        if (recipientIsTarget)
+        {
+            if (killerAvengedSelf)
+                message = Acore::StringFormat("Vous avez enfin terrassé {}, votre propre Némésis. L'affront est lavé dans le sang : {} x{} vous revient.", nemesisName, itemName, reward.itemCount);
+            else
+                message = Acore::StringFormat("Votre groupe a terrassé {} — votre propre Némésis. {} a porté le coup fatal et vos compagnons ont vengé votre défaite : {} x{} vous revient.", nemesisName, killerName, itemName, reward.itemCount);
+        }
+        else if (killerAvengedSelf)
+        {
+            message = Acore::StringFormat("{} a terrassé {}, sa propre Némésis. Vous avez pris part à cette vengeance et recevez {} x{}.", killerName, nemesisName, itemName, reward.itemCount);
+        }
+        else if (revenge)
+        {
+            if (recipientIsKiller)
+                message = Acore::StringFormat("Vous avez terrassé {} et vengé votre compagnon {}. Pour cet acte, {} x{} vous revient.", nemesisName, targetName, itemName, reward.itemCount);
+            else
+                message = Acore::StringFormat("{} a terrassé {} et vengé votre compagnon {}. Vous avez combattu à leurs côtés et recevez {} x{}.", killerName, nemesisName, targetName, itemName, reward.itemCount);
+        }
+        else
+        {
+            if (recipientIsKiller)
+                message = Acore::StringFormat("Vous avez abattu {}, la Némésis qui traquait {}. La prime est vôtre : {} x{}.", nemesisName, targetName, itemName, reward.itemCount);
+            else
+                message = Acore::StringFormat("{} a abattu {}, la Némésis qui traquait {}. Votre participation vous rapporte {} x{}.", killerName, nemesisName, targetName, itemName, reward.itemCount);
+        }
+
+        if (reward.itemMailed)
+            message += " Vos sacs ne pouvant accueillir ce butin, la récompense vous a été envoyée par courrier.";
+
+        ChatHandler(player->GetSession()).SendSysMessage(message);
+    }
+
+    void ProcessNemesisKillRewards(Player* killer, Creature* killed)
+    {
+        if (!killer || !killed)
+            return;
+
+        ObjectGuid::LowType const spawnId = killed->GetSpawnId();
+        if (!spawnId)
+            return;
+
+        NemesisState state;
+        if (!TryGetNemesisState(killed, state))
+            return;
+
+        if (!TryClaimNemesisKillReward(spawnId))
+            return;
+
+        RewardRecipients const recipients = CollectRewardRecipients(killer, killed);
+        float const rewardMultiplier = GetRewardMultiplier(killed->GetLevel(), recipients.highestLevel);
+        std::string const nemesisName = killed->GetName();
+        std::string const targetName = GetPlayerNameByGuidLow(state.targetGuid);
+
+        if (rewardMultiplier > 0.0f)
+        {
+            for (Player* recipient : recipients.players)
+            {
+                // A recipient may qualify both for a generic kill/bounty and
+                // for revenge. Revenge always has priority and only one reward
+                // can be granted to that recipient for this Nemesis death.
+                bool const revenge = IsPlayerEligibleForRevenge(recipient, state);
+                RewardGrantResult const reward = GrantReward(recipient, revenge, state.rank, rewardMultiplier, nemesisName, targetName);
+                NotifyNemesisItemReward(recipient, killer, state.targetGuid, revenge, reward, nemesisName, targetName);
+            }
+        }
+
+        // Keep the claim until this spawn is promoted again. This makes the
+        // UnitScript and PlayerScript death paths idempotent.
+        DeleteNemesisState(killed, "slain");
     }
 
     bool IsEligibleNemesisKill(Creature* killer, Player* killed)
@@ -1519,9 +1728,17 @@ namespace
             state.createdAt = now;
         RollAffixes(state);
 
+        // This spawn starts a new Nemesis reward lifecycle.
+        ResetNemesisKillRewardClaim(killer->GetSpawnId());
         SaveNemesisState(killer, state);
         ApplyNemesisState(killer, state);
         killer->SetFullHealth();
+
+        // Promotion is the authoritative moment at which the Nemesis visual must
+        // become visible. Re-assert the rank aura synchronously after every promotion
+        // mutation; the periodic refresh remains repair-only.
+        ApplyNemesisVisualAuras(killer, state.rank);
+
         if (ObjectGuid::LowType const spawnId = killer->GetSpawnId())
             BroadcastNemesisUpsert(spawnId, state);
 
@@ -1576,26 +1793,12 @@ public:
 
     void OnPlayerCreatureKill(Player* killer, Creature* killed) override
     {
-        if (!killer || !killed)
-            return;
-
-        NemesisState state;
-        if (!TryGetNemesisState(killed, state))
-            return;
-
-        bool const revenge = IsRevengeKill(killer, state);
-        RewardRecipients const recipients = CollectRewardRecipients(killer, killed);
-        float const rewardMultiplier = GetRewardMultiplier(killed->GetLevel(), recipients.highestLevel);
-
-        if (rewardMultiplier > 0.0f)
-            for (Player* recipient : recipients.players)
-                GrantReward(recipient, revenge, state.rank, rewardMultiplier);
-
+        ProcessNemesisKillRewards(killer, killed);
     }
 
     void OnPlayerCreatureKilledByPet(Player* owner, Creature* killed) override
     {
-        OnPlayerCreatureKill(owner, killed);
+        ProcessNemesisKillRewards(owner, killed);
     }
 };
 
@@ -1640,6 +1843,8 @@ public:
 
         if (creature->IsAlive())
         {
+            EraseDeadCleanupAccumulator(creature);
+
             // AllCreatureScript is the reliable per-creature update path. Keep the
             // visual aura self-healing here once per minute so existing/natural Nemeses are covered
             // even when UnitScript::OnUnitUpdate is not dispatched for that creature.
@@ -1649,16 +1854,36 @@ public:
             return;
         }
 
+        // Player/pet kill rewards need the Nemesis state after the fatal blow.
+        // Delay generic dead cleanup briefly so the reward hook cannot race it.
         EraseRegenAccumulator(creature);
         EraseVisualAuraAccumulator(creature);
-        DeleteNemesisState(creature, "dead");
+        if (UpdateDeadCleanupAccumulator(creature, diff, 5000))
+            DeleteNemesisState(creature, "dead");
     }
 };
 
 class NemesisSystemUnitScript : public UnitScript
 {
 public:
-    NemesisSystemUnitScript() : UnitScript("NemesisSystemUnitScript", true, { UNITHOOK_ON_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN, UNITHOOK_ON_UNIT_UPDATE }) { }
+    NemesisSystemUnitScript() : UnitScript("NemesisSystemUnitScript", true, { UNITHOOK_ON_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN, UNITHOOK_ON_UNIT_UPDATE, UNITHOOK_ON_UNIT_ENTER_EVADE_MODE, UNITHOOK_ON_UNIT_DEATH }) { }
+
+    void OnUnitEnterEvadeMode(Unit* unit, uint8 /*evadeReason*/) override
+    {
+        if (!unit || !unit->IsCreature())
+            return;
+
+        Creature* creature = unit->ToCreature();
+        NemesisState state;
+        if (!TryGetNemesisState(creature, state))
+            return;
+
+        // AzerothCore removes evade auras and resets the creature before this hook.
+        // Re-apply the Nemesis visual here so a promotion caused by killing the last
+        // player remains visible immediately after the NPC resets and returns home.
+        ApplyNemesisVisualAuras(creature, state.rank);
+        EraseVisualAuraAccumulator(creature);
+    }
 
     void OnDamage(Unit* attacker, Unit* /*victim*/, uint32& damage) override
     {
@@ -1699,6 +1924,21 @@ public:
             return;
 
         damage = std::max<int32>(1, int32(float(damage) * GetSpellwardDamageMultiplier()));
+    }
+
+    void OnUnitDeath(Unit* unit, Unit* killer) override
+    {
+        if (!unit || !killer || !unit->IsCreature())
+            return;
+
+        Creature* killed = unit->ToCreature();
+        if (!killed->GetSpawnId())
+            return;
+
+        // Resolve the actual player behind direct kills and controlled units:
+        // pets, demons, guardians/charmed units and player-controlled vehicles.
+        if (Player* playerKiller = killer->GetCharmerOrOwnerPlayerOrPlayerItself())
+            ProcessNemesisKillRewards(playerKiller, killed);
     }
 
     void OnUnitUpdate(Unit* unit, uint32 diff) override
@@ -2037,6 +2277,7 @@ public:
             ActiveNemeses.clear();
             RegenTickAccumulators.clear();
             VisualAuraTickAccumulators.clear();
+            DeadCleanupTickAccumulators.clear();
         }
 
         CharacterDatabase.Execute("DELETE FROM `character_nemesis`");

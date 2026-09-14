@@ -135,7 +135,10 @@ function UnitUI:Initialize()
     end
 
     if TargetFrame then
-        local iconFrame = CreateFrame("Frame", nil, TargetFrame)
+        -- Keep the Nemesis overlay outside TargetFrame's protected hierarchy.
+        -- It is visually anchored to TargetFrame but parented to UIParent so
+        -- live UPSERT/REMOVE refreshes can safely show/hide it during combat.
+        local iconFrame = CreateFrame("Frame", nil, UIParent)
         -- The portrait asset is a 256x128 sprite sheet containing five
         -- vertical banners from N1 (left) to N5 (right). 24x60 keeps the
         -- individual ~51x128 source slice close to its original aspect ratio.

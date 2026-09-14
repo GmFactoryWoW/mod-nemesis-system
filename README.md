@@ -137,7 +137,9 @@ Reward scaling config:
 
 ## Companion Addon
 
-The module includes the WoW 3.3.5a addon `ClientAddon/NemesisTracker/`. It can be loaded from `Interface/AddOns/` or integrated into FrameXML.
+The module includes the WoW 3.3.5a addon `ClientAddon/NemesisTracker/`. The same 0.4.1 client code can be loaded as a standard addon from `Interface/AddOns/NemesisTracker/` or integrated from `Interface/FrameXML/NemesisTracker/` through `NemesisTracker.xml`. In FrameXML mode, addon assets automatically resolve from the FrameXML root and `NemesisTrackerDB` is registered for persistence through `RegisterForSave` when available. Do not load both integration modes simultaneously.
+
+NemesisTracker registers a native `Interface > AddOns > NemesisTracker` configuration category in both modes. The panel controls World Map visibility and low-level Nemesis filtering, using the same settings as the quick menu on the World Map.
 
 NemesisTracker has no standalone tracker window. It renders server-authoritative Nemesis pins directly on the Blizzard World Map. N1-N4 remain restricted to detailed region/sub-zone maps; N5 can also be displayed on continent/world views.
 

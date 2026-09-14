@@ -12,11 +12,17 @@ local function applyDefaults(target, defaults)
     end
 end
 
+local function getRealmCacheKey()
+    if type(GetRealmName) ~= "function" then return nil end
+    local realmName = GetRealmName()
+    if type(realmName) ~= "string" or realmName == "" then return nil end
+    return realmName
+end
+
 function NT:InitializeDatabase()
     local defaults = {
         showOnMap = true,
         hideLowLevelNemeses = true,
-        cache = { protocolVersion = NT.protocolVersion or 4, nemeses = {} },
     }
 
     NemesisTrackerDB = NemesisTrackerDB or {}
@@ -26,22 +32,49 @@ function NT:InitializeDatabase()
             for _, candidate in pairs(NemesisTrackerDB.profiles) do
                 if type(candidate) == "table" then
                     migratedProfile = candidate
-                    if candidate.cache and candidate.cache.nemeses then break end
+                    break
                 end
             end
         end
         NemesisTrackerDB.profile = migratedProfile or {}
     end
+
+    -- Cache data is realm-scoped. Never migrate the legacy global cache into a
+    -- realm because its origin cannot be determined safely.
+    NemesisTrackerDB.profile.cache = nil
+    NemesisTrackerDB.realms = NemesisTrackerDB.realms or {}
+
     applyDefaults(NemesisTrackerDB.profile, defaults)
     self.database = NemesisTrackerDB
     self.db = NemesisTrackerDB.profile
-    self.db.cache = self.db.cache or { protocolVersion = NT.protocolVersion or 4, nemeses = {} }
-    if tonumber(self.db.cache.protocolVersion) ~= tonumber(NT.protocolVersion or 4) then
-        self.db.cache = { protocolVersion = NT.protocolVersion or 4, nemeses = {} }
+    self.realmKey = getRealmCacheKey()
+
+    local cache
+    if self.realmKey then
+        local realmState = NemesisTrackerDB.realms[self.realmKey]
+        if type(realmState) ~= "table" then
+            realmState = {}
+            NemesisTrackerDB.realms[self.realmKey] = realmState
+        end
+
+        cache = realmState.cache
+        if type(cache) ~= "table" or tonumber(cache.protocolVersion) ~= tonumber(NT.protocolVersion or 5) then
+            cache = { protocolVersion = NT.protocolVersion or 5, nemeses = {} }
+            realmState.cache = cache
+        end
+    else
+        -- If the realm cannot be resolved, keep only a volatile session cache
+        -- rather than risking data leakage between realms.
+        cache = { protocolVersion = NT.protocolVersion or 5, nemeses = {} }
     end
-    self.db.cache.protocolVersion = NT.protocolVersion or 4
-    self.db.cache.nemeses = self.db.cache.nemeses or {}
-    self.data.nemeses = self.db.cache.nemeses
+
+    cache.protocolVersion = NT.protocolVersion or 5
+    cache.nemeses = cache.nemeses or {}
+    self.cache = cache
+    self.data.nemeses = cache.nemeses
+    self.data.serverDataConfirmed = false
+    self.data.addonTransportVerified = false
+
     wipe(self.data.nemesesByUnitGuid)
     for _, nemesis in pairs(self.data.nemeses) do
         if type(nemesis.unitGuid) == "string" then
@@ -51,7 +84,6 @@ function NT:InitializeDatabase()
             end
         end
     end
-
 end
 
 function NT:SlashCommand(input)
@@ -75,6 +107,10 @@ function NT:OnInitialize()
 
     if self.UnitUI then
         self.UnitUI:Initialize()
+    end
+
+    if type(self.RefreshOptionsPanel) == "function" then
+        self:RefreshOptionsPanel()
     end
 
     SLASH_NEMESISTRACKER1 = "/nemesistracker"

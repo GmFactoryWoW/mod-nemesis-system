@@ -605,6 +605,10 @@ function UI:RefreshMap()
     hidePins()
     if not WorldMapButton or not WorldMapButton:IsShown() then return end
     if NT.db and NT.db.showOnMap == false then return end
+    -- Never expose persisted positions until this realm has supplied an
+    -- authoritative Nemesis data stream during the current session. This
+    -- prevents stale icons when the server does not have mod-nemesis-system.
+    if not NT.data.serverDataConfirmed then return end
 
     local instance, bounds = getDisplayedInstanceMap()
     if instance then
