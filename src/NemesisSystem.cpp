@@ -378,9 +378,9 @@ namespace
         {
             case 1: return 1.50f;
             case 2: return 2.00f;
-            case 3: return 3.00f;
-            case 4: return 4.50f;
-            default: return 6.00f;
+            case 3: return 2.50f;
+            case 4: return 3.00f;
+            default: return 3.50f;
         }
     }
 
