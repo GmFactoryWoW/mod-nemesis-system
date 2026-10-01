@@ -968,7 +968,7 @@ namespace
             state.mapId = fields[2].Get<uint32>();
             state.homeX = fields[3].Get<float>();
             state.homeY = fields[4].Get<float>();
-            state.rank = fields[5].Get<uint8>();
+            state.rank = std::clamp<uint8>(fields[5].Get<uint8>(), 1, GetMaxRank());
             state.affixMask = fields[6].Get<uint32>();
             state.baseHealth = fields[7].Get<uint32>();
             state.baseScale = fields[8].Get<float>();
@@ -1626,6 +1626,9 @@ namespace
         NemesisState state;
         if (TryGetNemesisState(killer->GetSpawnId(), state))
         {
+            if (state.rank >= GetMaxRank())
+                return false;
+
             if (GetRankUpCooldownRemaining(state) > 0)
                 return false;
 
@@ -1708,6 +1711,12 @@ namespace
         bool const existed = TryGetNemesisState(killer, state);
         uint8 const previousRank = existed ? state.rank : 0;
         uint32 const now = uint32(GameTime::GetGameTime().count());
+
+        // Max-rank Nemeses no longer progress from additional player kills.
+        // Keep this guard here as a second line of defense in case this
+        // function is called from another path in the future.
+        if (existed && state.rank >= GetMaxRank())
+            return;
 
         if (existed)
         {
