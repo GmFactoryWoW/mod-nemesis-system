@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2 - 2026-10-04
+
+### Stable base stats and lifecycle cleanup
+
+- Prevent Nemesis health, damage, scale, attack speed, and run speed from being re-captured from an already-scaled runtime creature by caching a stable per-spawn base snapshot before first promotion.
+- Seed the stable runtime base cache from persisted `base_*` values when an existing Nemesis is loaded after a server restart.
+- Restore a Nemesis creature to its persisted base stats before removing its state after a rewarded kill or delayed dead-creature cleanup, preventing scaled values from leaking into the next respawn lifecycle.
+- Restore expired live Nemeses to base stats before deleting their persistent state.
+- Make `.nemesis clearall` restore every currently loaded Nemesis found on active player maps before deleting all records, and clear residual kill-claim state.
+- Extend `.nemesis debug` with persisted base and expected rank-scaled health/damage values for direct diagnosis of stat drift.
+- Re-assert base max health after `UpdateAllStats()` during reset so core stat recalculation cannot leave a cleared creature with a scaled maximum.
+
 ## 0.4.1
 
 - Nemesis rank auras are now re-applied immediately after AzerothCore evade/reset processing, preventing a newly promoted Nemesis from losing its visual aura when it returns to its spawn point. - 2026-09-14

@@ -98,10 +98,25 @@ namespace
         std::string threatClass;
     };
 
+    struct CreatureBaseStats
+    {
+        uint32 health = 1;
+        float scale = 1.0f;
+        float meleeMinDamage = BASE_MINDAMAGE;
+        float meleeMaxDamage = BASE_MAXDAMAGE;
+        float rangedMinDamage = 0.0f;
+        float rangedMaxDamage = 0.0f;
+        uint32 attackTime = BASE_ATTACK_TIME;
+        uint32 rangeAttackTime = BASE_ATTACK_TIME;
+        float runSpeedRate = 1.0f;
+    };
+
     using NemesisStore = std::unordered_map<ObjectGuid::LowType, NemesisState>;
     using NemesisTickStore = std::unordered_map<ObjectGuid::LowType, uint32>;
+    using CreatureBaseStatsStore = std::unordered_map<ObjectGuid::LowType, CreatureBaseStats>;
 
     NemesisStore ActiveNemeses;
+    CreatureBaseStatsStore KnownCreatureBaseStats;
     NemesisTickStore RegenTickAccumulators;
     NemesisTickStore VisualAuraTickAccumulators;
     NemesisTickStore DeadCleanupTickAccumulators;
@@ -126,6 +141,7 @@ namespace
     std::string GetNemesisDisplayName(Map* map, ObjectGuid::LowType spawnId, NemesisState const& state);
     void EnsureCacheLoaded();
     bool IsExpired(NemesisState const& state);
+    void ResetCreatureToBaseState(Creature* creature, NemesisState const& state);
 
     bool IsEnabled()
     {
@@ -1023,7 +1039,42 @@ namespace
         if (!creature || !creature->GetSpawnId())
             return false;
 
-        return TryGetNemesisState(creature->GetSpawnId(), state);
+        ObjectGuid::LowType const spawnId = creature->GetSpawnId();
+        NemesisState expiredState;
+        bool expired = false;
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+            EnsureCacheLoaded();
+
+            NemesisStore::iterator itr = ActiveNemeses.find(spawnId);
+            if (itr == ActiveNemeses.end())
+                return false;
+
+            if (IsExpired(itr->second))
+            {
+                expiredState = itr->second;
+                expired = true;
+                ActiveNemeses.erase(itr);
+                RegenTickAccumulators.erase(spawnId);
+                VisualAuraTickAccumulators.erase(spawnId);
+                DeadCleanupTickAccumulators.erase(spawnId);
+                CharacterDatabase.Execute("DELETE FROM `character_nemesis` WHERE `guid` = {}", uint64(spawnId));
+            }
+            else
+            {
+                state = itr->second;
+                return true;
+            }
+        }
+
+        if (expired)
+        {
+            ResetCreatureToBaseState(creature, expiredState);
+            BroadcastNemesisRemove(spawnId, "expired");
+        }
+
+        return false;
     }
 
     void SaveNemesisState(Creature* creature, NemesisState const& state)
@@ -1167,24 +1218,101 @@ namespace
         DeadCleanupTickAccumulators.erase(creature->GetSpawnId());
     }
 
+    CreatureBaseStats MakeBaseStatsFromState(NemesisState const& state)
+    {
+        CreatureBaseStats base;
+        base.health = std::max<uint32>(1, state.baseHealth);
+        base.scale = state.baseScale;
+        base.meleeMinDamage = state.baseMeleeMinDamage;
+        base.meleeMaxDamage = state.baseMeleeMaxDamage;
+        base.rangedMinDamage = state.baseRangedMinDamage;
+        base.rangedMaxDamage = state.baseRangedMaxDamage;
+        base.attackTime = state.baseAttackTime;
+        base.rangeAttackTime = state.baseRangeAttackTime;
+        base.runSpeedRate = state.baseRunSpeedRate;
+        return base;
+    }
+
+    CreatureBaseStats CaptureRuntimeBaseStats(Creature* creature)
+    {
+        CreatureBaseStats base;
+        if (!creature)
+            return base;
+
+        base.health = std::max<uint32>(1, creature->GetCreateHealth());
+        base.scale = creature->GetNativeObjectScale();
+        base.meleeMinDamage = std::max<float>(BASE_MINDAMAGE, creature->GetWeaponDamageRange(BASE_ATTACK, MINDAMAGE, 0));
+        base.meleeMaxDamage = std::max<float>(BASE_MAXDAMAGE, creature->GetWeaponDamageRange(BASE_ATTACK, MAXDAMAGE, 0));
+        base.rangedMinDamage = std::max<float>(0.0f, creature->GetWeaponDamageRange(RANGED_ATTACK, MINDAMAGE, 0));
+        base.rangedMaxDamage = std::max<float>(0.0f, creature->GetWeaponDamageRange(RANGED_ATTACK, MAXDAMAGE, 0));
+        base.attackTime = creature->GetCreatureTemplate()->BaseAttackTime;
+        base.rangeAttackTime = creature->GetCreatureTemplate()->RangeAttackTime;
+        base.runSpeedRate = creature->GetSpeedRate(MOVE_RUN);
+        return base;
+    }
+
+    void RememberCreatureBaseStats(Creature* creature, CreatureBaseStats const& base)
+    {
+        if (!creature || !creature->GetSpawnId())
+            return;
+
+        std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+        KnownCreatureBaseStats[creature->GetSpawnId()] = base;
+    }
+
+    void RememberCreatureBaseStats(Creature* creature, NemesisState const& state)
+    {
+        RememberCreatureBaseStats(creature, MakeBaseStatsFromState(state));
+    }
+
+    void RememberRuntimeBaseStats(Creature* creature)
+    {
+        if (!creature || !creature->GetSpawnId())
+            return;
+
+        std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+        if (KnownCreatureBaseStats.find(creature->GetSpawnId()) == KnownCreatureBaseStats.end())
+            KnownCreatureBaseStats.emplace(creature->GetSpawnId(), CaptureRuntimeBaseStats(creature));
+    }
+
+    CreatureBaseStats GetStableCreatureBaseStats(Creature* creature)
+    {
+        if (!creature)
+            return CreatureBaseStats{};
+
+        ObjectGuid::LowType const spawnId = creature->GetSpawnId();
+        if (spawnId)
+        {
+            std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+            auto const itr = KnownCreatureBaseStats.find(spawnId);
+            if (itr != KnownCreatureBaseStats.end())
+                return itr->second;
+        }
+
+        CreatureBaseStats const base = CaptureRuntimeBaseStats(creature);
+        RememberCreatureBaseStats(creature, base);
+        return base;
+    }
+
     NemesisState BuildInitialNemesisState(Creature* killer, Player* killed)
     {
         NemesisState state;
+        CreatureBaseStats const base = GetStableCreatureBaseStats(killer);
         state.creatureEntry = killer->GetEntry();
         state.mapId = killer->GetMapId();
         state.rank = 1;
         state.affixMask = 0;
         state.homeX = killer->GetPositionX();
         state.homeY = killer->GetPositionY();
-        state.baseHealth = std::max<uint32>(1, killer->GetCreateHealth());
-        state.baseScale = killer->GetNativeObjectScale();
-        state.baseMeleeMinDamage = std::max<float>(BASE_MINDAMAGE, killer->GetWeaponDamageRange(BASE_ATTACK, MINDAMAGE, 0));
-        state.baseMeleeMaxDamage = std::max<float>(BASE_MAXDAMAGE, killer->GetWeaponDamageRange(BASE_ATTACK, MAXDAMAGE, 0));
-        state.baseRangedMinDamage = std::max<float>(0.0f, killer->GetWeaponDamageRange(RANGED_ATTACK, MINDAMAGE, 0));
-        state.baseRangedMaxDamage = std::max<float>(0.0f, killer->GetWeaponDamageRange(RANGED_ATTACK, MAXDAMAGE, 0));
-        state.baseAttackTime = killer->GetCreatureTemplate()->BaseAttackTime;
-        state.baseRangeAttackTime = killer->GetCreatureTemplate()->RangeAttackTime;
-        state.baseRunSpeedRate = killer->GetSpeedRate(MOVE_RUN);
+        state.baseHealth = base.health;
+        state.baseScale = base.scale;
+        state.baseMeleeMinDamage = base.meleeMinDamage;
+        state.baseMeleeMaxDamage = base.meleeMaxDamage;
+        state.baseRangedMinDamage = base.rangedMinDamage;
+        state.baseRangedMaxDamage = base.rangedMaxDamage;
+        state.baseAttackTime = base.attackTime;
+        state.baseRangeAttackTime = base.rangeAttackTime;
+        state.baseRunSpeedRate = base.runSpeedRate;
         state.targetGuid = killed->GetGUID().GetCounter();
         state.createdAt = uint32(GameTime::GetGameTime().count());
         return state;
@@ -1227,6 +1355,11 @@ namespace
         if (!creature)
             return;
 
+        // Persisted Nemesis base stats are authoritative. Remember them before
+        // mutating the runtime creature so a later lifecycle can never capture
+        // an already-scaled value as its new baseline.
+        RememberCreatureBaseStats(creature, state);
+
         creature->SetObjectScale(state.baseScale);
         creature->SetCreateHealth(state.baseHealth);
         creature->SetStatFlatModifier(UNIT_MOD_HEALTH, BASE_VALUE, float(state.baseHealth));
@@ -1247,9 +1380,10 @@ namespace
         RemoveNemesisVisualAuras(creature);
 
         creature->UpdateAllStats();
+        creature->SetMaxHealth(state.baseHealth);
 
         if (creature->IsAlive())
-            creature->SetFullHealth();
+            creature->SetHealth(state.baseHealth);
     }
 
     bool IsPlayerEligibleForRevenge(Player* player, NemesisState const& state)
@@ -1578,6 +1712,12 @@ namespace
             }
         }
 
+        // Restore the runtime object before dropping persistence. AzerothCore can
+        // reuse the same Creature object for respawn, so leaving scaled create-health,
+        // damage or speed on the dead object would turn those values into the next
+        // lifecycle's apparent baseline.
+        ResetCreatureToBaseState(killed, state);
+
         // Keep the claim until this spawn is promoted again. This makes the
         // UnitScript and PlayerScript death paths idempotent.
         DeleteNemesisState(killed, "slain");
@@ -1624,7 +1764,7 @@ namespace
             return false;
 
         NemesisState state;
-        if (TryGetNemesisState(killer->GetSpawnId(), state))
+        if (TryGetNemesisState(killer, state))
         {
             if (state.rank >= GetMaxRank())
                 return false;
@@ -1820,8 +1960,16 @@ public:
     {
         NemesisState state;
         if (!TryGetNemesisState(creature, state))
+        {
+            // Capture the pristine runtime stats before this spawn can ever become
+            // a Nemesis. BuildInitialNemesisState will prefer this stable snapshot.
+            RememberRuntimeBaseStats(creature);
             return;
+        }
 
+        // Existing persisted Nemeses seed the stable baseline from persistence,
+        // never from their already-scaled runtime values.
+        RememberCreatureBaseStats(creature, state);
         ApplyNemesisState(creature, state);
         state.homeX = creature->GetPositionX();
         state.homeY = creature->GetPositionY();
@@ -1868,7 +2016,10 @@ public:
         EraseRegenAccumulator(creature);
         EraseVisualAuraAccumulator(creature);
         if (UpdateDeadCleanupAccumulator(creature, diff, 5000))
+        {
+            ResetCreatureToBaseState(creature, state);
             DeleteNemesisState(creature, "dead");
+        }
     }
 };
 
@@ -2051,8 +2202,11 @@ public:
         }
 
         handler->PSendSysMessage("Rank {} | Affixes {} | TargetGuid {}", state.rank, GetAffixList(state.affixMask), state.targetGuid);
-        handler->PSendSysMessage("Health {} / {} | Scale {}", target->GetHealth(), target->GetMaxHealth(), target->GetObjectScale());
-        handler->PSendSysMessage("Main damage {} - {}", target->GetWeaponDamageRange(BASE_ATTACK, MINDAMAGE), target->GetWeaponDamageRange(BASE_ATTACK, MAXDAMAGE));
+        uint32 const expectedHealth = std::max<uint32>(1, uint32(float(state.baseHealth) * GetHealthMultiplier(state.rank)));
+        float const expectedMeleeMin = std::max<float>(BASE_MINDAMAGE, state.baseMeleeMinDamage * GetDamageMultiplier(state.rank));
+        float const expectedMeleeMax = std::max<float>(BASE_MAXDAMAGE, state.baseMeleeMaxDamage * GetDamageMultiplier(state.rank));
+        handler->PSendSysMessage("Health {} / {} | Base {} | Expected {} | Scale {}", target->GetHealth(), target->GetMaxHealth(), state.baseHealth, expectedHealth, target->GetObjectScale());
+        handler->PSendSysMessage("Main damage {} - {} | Base {} - {} | Expected {} - {}", target->GetWeaponDamageRange(BASE_ATTACK, MINDAMAGE), target->GetWeaponDamageRange(BASE_ATTACK, MAXDAMAGE), state.baseMeleeMinDamage, state.baseMeleeMaxDamage, expectedMeleeMin, expectedMeleeMax);
         handler->PSendSysMessage("Rank-up cooldown remaining {}s | Same victim cooldown remaining {}s", GetRankUpCooldownRemaining(state), GetSameVictimCooldownRemaining(state, state.targetGuid));
         return true;
     }
@@ -2281,17 +2435,51 @@ public:
     static bool HandleClearAll(ChatHandler* handler)
     {
         EnsureCacheLoaded();
+
+        NemesisStore statesToClear;
+        {
+            std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
+            statesToClear = ActiveNemeses;
+        }
+
+        // Restore every currently loaded open-world Nemesis before deleting its
+        // persistent state. Loaded outdoor creatures necessarily have an active map;
+        // use online players to enumerate those maps without relying on MapMgr internals.
+        std::unordered_set<Map*> visitedMaps;
+        ForEachOnlinePlayer([&](Player* player)
+        {
+            if (!player || !player->GetMap())
+                return;
+
+            Map* map = player->GetMap();
+            if (!visitedMaps.insert(map).second)
+                return;
+
+            for (auto const& [spawnId, state] : statesToClear)
+            {
+                if (state.mapId != map->GetId())
+                    continue;
+
+                if (Creature* liveCreature = FindLoadedCreatureBySpawnId(map, spawnId))
+                    ResetCreatureToBaseState(liveCreature, state);
+            }
+        });
+
         {
             std::lock_guard<std::recursive_mutex> lock(NemesisStoreMutex);
             ActiveNemeses.clear();
             RegenTickAccumulators.clear();
             VisualAuraTickAccumulators.clear();
             DeadCleanupTickAccumulators.clear();
+            RewardedNemesisKills.clear();
         }
 
         CharacterDatabase.Execute("DELETE FROM `character_nemesis`");
+
+        // A full bootstrap after the authoritative store is empty tells clients
+        // to purge every stale Nemesis entry.
         ForEachOnlinePlayer([](Player* player) { SendNemesisBootstrap(player); });
-        handler->PSendSysMessage("Cleared all stored nemesis records.");
+        handler->PSendSysMessage("Cleared all stored nemesis records and restored loaded creatures to their base stats.");
         return true;
     }
     static bool HandleReload(ChatHandler* handler)

@@ -63,7 +63,7 @@ Additional affix behavior:
 - `Enraged`: gains bonus damage below a configurable health threshold.
 - `Regenerating`: restores health periodically while damaged.
 - The original victim is stored as the current nemesis target.
-- Base creature stats are persisted so scaling stays stable across restarts and reloads.
+- Base creature stats are persisted and protected by a stable per-spawn runtime snapshot so rank scaling cannot compound across deaths, respawns, clears, expiration, reloads, or server restarts.
 
 ## Eligibility Config
 
